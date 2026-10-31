@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <title>Markdown WYSIWYG для Grist</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <link rel="stylesheet" href="https://uicdn.toast.com/editor/latest/toastui-editor.min.css">
+  <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+  <script src="https://uicdn.toast.com/editor/latest/toastui-editor-all.min.js"></script>
+
+  <style>
+    html, body { margin: 0; height: 100%; background: #fff; }
+    #editor { height: 100%; }
+    /* курсор-"рука" для посилань у WYSIWYG */
+    .toastui-editor-ww-container a { cursor: pointer; }
+    #msg {
+      display: none; padding: 24px; font: 14px/1.5 sans-serif; color: #666;
+    }
+  </style>
+</head>
+<body>
+  <div id="msg"></div>
+  <div id="editor"></div>
+
+<script>
+(function () {
+  // ---------- Налаштування ----------
+  const COLUMN = 'Content';     // віртуальна назва колонки (мапиться в Grist)
+  const SAVE_DELAY_MS = 600;    // debounce збереження
+  const SAFE_URL = /^(https?:\/\/|mailto:|tel:)/i;
+  const BARE_URL = /^https?:\/\/\S+$/i;
+
+  // ---------- Стан ----------
+  let editor = null;
+  let currentId = null;     // id поточного запису
+  let lastSaved = '';       // останнє значення, яке знаємо в Grist
+  let saveTimer = null;
+  let applyingRemote = false; // щоб setMarkdown з Grist не тригерив збереження
+
+  // ---------- Ініціалізація редактора ----------
+  function createEditor() {
+    editor = new toastui.Editor({
+      el: document.getElementById('editor'),
+      height: '100%',
+      initialEditType: 'wysiwyg',
+      previewStyle: 'tab',
+      hideModeSwitch: false,
+      usageStatistics: false,
+      extendedAutolinks: true,                       // голі URL -> посилання при конвертації
+      linkAttributes: { target: '_blank', rel: 'noopener noreferrer' },
+      toolbarItems: [
+        ['heading', 'bold', 'italic', 'strike'],
+        ['hr', 'quote'],
+        ['ul', 'ol', 'task', 'indent', 'outdent'],   // 'task' = чекліст
+        ['table', 'link'],
+        ['code', 'codeblock']
+      ],
+      events: {
+        change: onEditorChange,
+        blur: flushSave
+      }
+    });
+
+    const root = document.getElementById('editor');
+
+    // 1) Клік по посиланню у WYSIWYG відкриває його
+    root.addEventListener('click', function (e) {
+      const a = e.target.closest && e.target.closest('.toastui-editor-ww-container a');
+      if (!a) return;
+      const href = a.getAttribute('href') || '';
+      if (!SAFE_URL.test(href)) return;
+      e.preventDefault();
+      window.open(href, '_blank', 'noopener,noreferrer');
+    });
+
+    // 2) Вставка URL з буфера -> одразу клікабельне посилання
+    root.addEventListener('paste', function (e) {
+      if (!editor.isWysiwygMode()) return;
+      if (!e.target.closest || !e.target.closest('.toastui-editor-ww-container')) return;
+
+      const cd = e.clipboardData;
+      if (!cd) return;
+      const text = (cd.getData('text/plain') || '').trim();
+      const html = cd.getData('text/html') || '';
+      if (!BARE_URL.test(text) || /<a\s/i.test(html)) return; // нехай браузер/Toast обробить сам
+
+      e.preventDefault();
+      e.stopPropagation();
+      editor.exec('addLink', { linkUrl: text, linkText: text });
+    }, true); // capture — щоб випередити ProseMirror
+  }
+
+  // ---------- Збереження ----------
+  function onEditorChange() {
+    if (applyingRemote || currentId === null) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(flushSave, SAVE_DELAY_MS);
+  }
+
+  async function flushSave() {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    if (!editor || currentId === null) return;
+    const md = editor.getMarkdown();
+    if (md === lastSaved) return;
+    lastSaved = md;
+    try {
+      await grist.selectedTable.update({ id: currentId, fields: { [COLUMN]: md } });
+    } catch (err) {
+      console.error('Не вдалося зберегти:', err);
+    }
+  }
+
+  // ---------- Допоміжне ----------
+  function showMessage(text) {
+    const m = document.getElementById('msg');
+    m.textContent = text;
+    m.style.display = text ? 'block' : 'none';
+    document.getElementById('editor').style.display = text ? 'none' : 'block';
+  }
+
+  function setContent(value) {
+    applyingRemote = true;
+    editor.setMarkdown(value || '', false);
+    applyingRemote = false;
+  }
+
+  // ---------- Інтеграція з Grist ----------
+  grist.ready({
+    requiredAccess: 'full',
+    columns: [{ name: COLUMN, title: 'Markdown-текст', type: 'Text' }]
+  });
+
+  grist.onRecord(async function (record, mapped) {
+    if (!editor) createEditor();
+
+    // Зберегти незбережене в попередньому записі, перш ніж перемкнутись
+    if (currentId !== null && (record === null || record.id !== currentId)) {
+      await flushSave();
+    }
+
+    if (!record) {
+      currentId = null;
+      showMessage('Немає вибраного запису.');
+      return;
+    }
+    if (!mapped) {
+      currentId = null;
+      showMessage('Вкажіть колонку в налаштуваннях віджета (Visible columns → Markdown-текст).');
+      return;
+    }
+
+    showMessage('');
+    const incoming = mapped[COLUMN] == null ? '' : String(mapped[COLUMN]);
+    const sameRecord = record.id === currentId;
+    currentId = record.id;
+
+    // Не чіпаємо редактор, якщо це "ехо" нашого власного збереження
+    if (sameRecord && incoming === editor.getMarkdown()) {
+      lastSaved = incoming;
+      return;
+    }
+    lastSaved = incoming;
+    setContent(incoming);
+  });
+
+  // Підстраховка при закритті/перемиканні
+  window.addEventListener('beforeunload', flushSave);
+})();
+</script>
+</body>
+</html>
