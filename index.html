@@ -25,20 +25,19 @@
 
 <script>
 (function () {
-  // ---------- Налаштування ----------
   const COLUMN = 'Content';
   const SAVE_DELAY_MS = 600;
   const SAFE_URL = /^(https?:\/\/|mailto:|tel:)/i;
   const BARE_URL = /^https?:\/\/\S+$/i;
 
-  // ---------- Стан ----------
   let editor = null;
   let currentId = null;
+  let columnId = null;
   let lastSaved = '';
   let saveTimer = null;
   let applyingRemote = false;
+  let savePromise = null;
 
-  // ---------- Ініціалізація редактора ----------
   function createEditor() {
     editor = new toastui.Editor({
       el: document.getElementById('editor'),
@@ -89,33 +88,47 @@
     }, true);
   }
 
-  // ---------- Збереження ----------
   function onEditorChange() {
     if (applyingRemote || currentId === null) return;
     clearTimeout(saveTimer);
     saveTimer = setTimeout(flushSave, SAVE_DELAY_MS);
   }
 
-  async function flushSave() {
+  function flushSave() {
     clearTimeout(saveTimer);
     saveTimer = null;
-    if (!editor || currentId === null) return;
-    const md = editor.getMarkdown();
-    if (md === lastSaved) return;
-    const previousSaved = lastSaved;
-    lastSaved = md;
-    try {
-      const fields = grist.mapColumnNamesBack({ [COLUMN]: md });
-      await grist.selectedTable.update({ id: currentId, fields });
-      showMessage('');
-    } catch (err) {
-      if (lastSaved === md) lastSaved = previousSaved;
-      console.error('Не вдалося зберегти:', err);
-      showMessage('Помилка збереження: ' + err.message, true);
-    }
+    if (!editor || currentId === null || columnId === null) return Promise.resolve();
+    if (savePromise) return savePromise;
+
+    savePromise = (async function saveLatestChanges() {
+      while (currentId !== null && columnId !== null) {
+        const recordId = currentId;
+        const targetColumnId = columnId;
+        const markdown = editor.getMarkdown();
+        if (markdown === lastSaved) break;
+
+        try {
+          await grist.selectedTable.update({
+            id: recordId,
+            fields: { [targetColumnId]: markdown }
+          });
+        } catch (err) {
+          console.error('Не вдалося зберегти:', err);
+          showMessage('Помилка збереження: ' + err.message, true);
+          break;
+        }
+
+        if (currentId !== recordId || columnId !== targetColumnId) break;
+        lastSaved = markdown;
+        showMessage('');
+      }
+    })().finally(function () {
+      savePromise = null;
+    });
+
+    return savePromise;
   }
 
-  // ---------- Допоміжне ----------
   function showMessage(text, keepEditorVisible = false) {
     const m = document.getElementById('msg');
     m.textContent = text;
@@ -125,38 +138,51 @@
 
   function setContent(value) {
     applyingRemote = true;
-    editor.setMarkdown(value || '', false);
-    applyingRemote = false;
+    try {
+      editor.setMarkdown(value || '', false);
+    } finally {
+      applyingRemote = false;
+    }
   }
 
-  // ---------- Інтеграція з Grist ----------
   grist.ready({
     requiredAccess: 'full',
     columns: [{ name: COLUMN, title: 'Markdown-текст', type: 'Text' }]
   });
 
-  grist.onRecord(async function (record, mapped) {
+  grist.onRecord(async function (record, mappings) {
     if (!editor) createEditor();
 
-    if (currentId !== null && (record === null || record.id !== currentId)) {
+    const mappedColumnId = mappings && mappings[COLUMN];
+    const nextColumnId = typeof mappedColumnId === 'string' ? mappedColumnId : null;
+    const recordChanged = currentId !== null &&
+      (!record || record.id !== currentId || nextColumnId !== columnId);
+    if (recordChanged) {
       await flushSave();
     }
 
     if (!record) {
       currentId = null;
+      columnId = null;
       showMessage('Немає вибраного запису.');
       return;
     }
-    if (!mapped) {
+    if (nextColumnId === null) {
       currentId = null;
+      columnId = null;
       showMessage('Вкажіть колонку в налаштуваннях віджета (Visible columns → Markdown-текст).');
       return;
     }
 
     showMessage('');
-    const incoming = mapped[COLUMN] == null ? '' : String(mapped[COLUMN]);
+    const incoming = record[nextColumnId] == null ? '' : String(record[nextColumnId]);
     const sameRecord = record.id === currentId;
+    if (sameRecord && editor.getMarkdown() !== lastSaved && incoming !== editor.getMarkdown()) {
+      return;
+    }
+
     currentId = record.id;
+    columnId = nextColumnId;
 
     if (sameRecord && incoming === editor.getMarkdown()) {
       lastSaved = incoming;
