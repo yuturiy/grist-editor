@@ -37,7 +37,6 @@
   let lastSaved = '';
   let saveTimer = null;
   let applyingRemote = false;
-  let realColumnName = COLUMN; // ДОДАНО: Змінна для зберігання реальної назви колонки
 
   // ---------- Ініціалізація редактора ----------
   function createEditor() {
@@ -103,22 +102,25 @@
     if (!editor || currentId === null) return;
     const md = editor.getMarkdown();
     if (md === lastSaved) return;
+    const previousSaved = lastSaved;
     lastSaved = md;
     try {
-      // ЗМІНЕНО: Використовуємо realColumnName замість COLUMN
-      await grist.selectedTable.update({ id: currentId, fields: { [realColumnName]: md } });
+      const fields = grist.mapColumnNamesBack({ [COLUMN]: md });
+      await grist.selectedTable.update({ id: currentId, fields });
+      showMessage('');
     } catch (err) {
+      if (lastSaved === md) lastSaved = previousSaved;
       console.error('Не вдалося зберегти:', err);
-      showMessage('Помилка збереження: ' + err.message);
+      showMessage('Помилка збереження: ' + err.message, true);
     }
   }
 
   // ---------- Допоміжне ----------
-  function showMessage(text) {
+  function showMessage(text, keepEditorVisible = false) {
     const m = document.getElementById('msg');
     m.textContent = text;
     m.style.display = text ? 'block' : 'none';
-    document.getElementById('editor').style.display = text ? 'none' : 'block';
+    document.getElementById('editor').style.display = text && !keepEditorVisible ? 'none' : 'block';
   }
 
   function setContent(value) {
@@ -131,15 +133,6 @@
   grist.ready({
     requiredAccess: 'full',
     columns: [{ name: COLUMN, title: 'Markdown-текст', type: 'Text' }]
-  });
-
-  // ДОДАНО: Слухаємо налаштування віджета, щоб дізнатися, яку колонку вибрав користувач
-  grist.on('options', function(options) {
-    if (options && options.mapping && options.mapping[COLUMN]) {
-      realColumnName = options.mapping[COLUMN];
-    } else {
-      realColumnName = COLUMN;
-    }
   });
 
   grist.onRecord(async function (record, mapped) {
