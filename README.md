@@ -5,6 +5,7 @@ A custom [Grist](https://www.getgrist.com/) widget for editing a table's Markdow
 ## Features
 
 - Edit Markdown in WYSIWYG mode or switch to Markdown.
+- The editor does not take focus automatically when the widget loads.
 - Supports headings, formatting, lists, task lists, quotes, tables, links, and code blocks.
 - Automatically saves changes to the selected record after a short pause or when the editor loses focus.
 - Opens supported links (`http`, `https`, `mailto`, and `tel`) in a new tab.
